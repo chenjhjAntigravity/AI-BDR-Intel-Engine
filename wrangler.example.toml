@@ -1,0 +1,55 @@
+name = "ai-bdr-intel-engine"
+main = "src/index.js"
+compatibility_date = "2024-04-01"
+compatibility_flags = [ "nodejs_compat" ]
+workers_dev = true
+
+# Replace with your custom domain if you have one, or remove this section
+# routes = [
+#   { pattern = "your-domain.com", custom_domain = true }
+# ]
+
+# Environment Variables
+[vars]
+# Optional: If you run a local bridge for deep network scanning, add the URL here
+BRIDGE_URL = "https://your-bridge-url.example.com"
+# Your email address to receive high-value leads
+SUBSCRIBER_EMAIL = "your_email@gmail.com"
+
+# API Keys should be set securely via wrangler secret:
+# wrangler secret put APOLLO_API_KEY
+# wrangler secret put DEEPSEEK_API_KEY
+# wrangler secret put TELEGRAM_BOT_TOKEN
+# wrangler secret put TELEGRAM_CHAT_ID
+
+[ai]
+binding = "AI"
+
+[triggers]
+# "0 1 * * 1-5" = Discovery (Mon-Fri 9:00 AM Beijing time)
+# "* * * * *" = Queue Processor (runs every minute to check pending leads)
+crons = ["0 1 * * 1-5", "* * * * *"]
+
+# Please run this command in your terminal to create the KV namespace:
+# npx wrangler kv:namespace create "BDR_LEADS_CACHE"
+# Then replace the ID below with the ID it outputs!
+[[kv_namespaces]]
+binding = "BDR_LEADS_CACHE"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "bdr-kb-index"
+
+# Run: npx wrangler d1 create bdr-intel-db
+[[d1_databases]]
+binding = "DB"
+database_name = "bdr-intel-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[browser]
+binding = "BROWSER"
+
+[[r2_buckets]]
+binding = "REPORTS_BUCKET"
+bucket_name = "bdr-reports"
