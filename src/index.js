@@ -354,31 +354,45 @@ async function runOSINT(company, inDomain, env) {
     env.DB ? env.DB.prepare('SELECT name, title, url FROM maimai_contacts WHERE company_name LIKE ? OR company_name LIKE ?')
       .bind(`%${displayName}%`, `%${domain.split('.')[0]}%`).all().then(r => r.results || []).catch(() => []) : Promise.resolve([]),
     // 8. 并发执行网页截图 (避免串行导致的超时)
-    takeScreenshot(`https://${domain}`, env).catch(() => null)
+    takeScreenshot(`https://${domain}`, env).catch(() => null),
+    // 9. 智能网页抓取 (标题/元数据/招聘关键词)
+    scrapeWebsiteData(domain, env).catch(() => null),
+    // 10. GitHub 活跃度追踪
+    getGitHubOrgData(displayName, domain, env).catch(() => "")
   ]);
+
+  // ── 进行 Vectorize RAG 销售智库查询 ──
+  const scrapedWebData = results[8];
+  const githubData = results[9];
+  const finalDesc = apolloOrgData.desc && !['N/A','暂无画像',''].includes(apolloOrgData.desc) ? apolloOrgData.desc : (scrapedWebData?.desc || "");
+  const ragContext = await queryVectorizeRAG(finalDesc, apolloOrgData.industry, env);
 
   // AI 攻坚策略 (AI - 三段式专家级输出，高可用 fallback)
   let aiStrategy = "AI 策略生成失败。";
   if (env.DEEPSEEK_API_KEY || env.AI) {
     try {
       const contactNames = contactData.map(c => c.name).join(', ');
-      const englishDesc = apolloOrgData.desc && !['N/A','暂无画像',''].includes(apolloOrgData.desc) ? apolloOrgData.desc : '';
+      const englishDesc = apolloOrgData.desc && !['N/A','暂无画像',''].includes(apolloOrgData.desc) ? apolloOrgData.desc : (scrapedWebData?.desc || '');
       const prompt = `你现在是 Cloudflare 的顶级业务开拓代表(BDR)。你需要基于以下情报，输出极具杀伤力的拓客策略。
 
 【严格约束】
 1. 事实绑定：仅限使用下面【情报区】提供的数据。如果某个项为“无”或“未检测到”，禁止在策略或邮件中提及该领域的竞品名称（严禁脑补 F5, Akamai, Imperva 等）。
 2. 身份校验：如果【联系人名单】为空，冷邮件开头必须使用“IT 负责人”或“技术主管”等通用称呼，严禁虚构具体人名。
 3. 语气：极其自然、地道的中文商务口吻，拒绝机器翻译感。
+4. 智库优先：如果提供了【Cloudflare 官方智库匹配方案】，在推荐产品组合和切入点时，必须优先参考该方案中的专业痛点与产品话术。
 
 【情报区】
 目标客户: ${displayName} (${domain})
 【公司简介】${englishDesc || '无'}
 【联系人名单】${contactNames || '暂无(使用通用称呼)'}
 【公司画像】规模: ${apolloOrgData.size}人 | 行业: ${apolloOrgData.industry}
+【官网抓取】官网标题: ${scrapedWebData?.title || '无'} | 招聘/官网技术关键词: ${(scrapedWebData?.hiringKeywords || []).join(", ") || '无'}
+【开源社区】${githubData || '无'}
 【现网探测】状态: ${httpData.status || 'Unknown'} | IP: ${dnsData.ips} | Server: ${httpData.server}
 CF状态: ${httpData.cfProxy ? '已开启代理' : '未开启'} | Zero Trust: ${httpData.cfTeam ? '🔥 已部署' : '未探测到'}
 【WAF雷达证据】F5: ${httpData.signatures?.f5 || '未检测到'} | Akamai: ${httpData.signatures?.akamai || '未检测到'} | Imperva: ${httpData.signatures?.imperva || '未检测到'}
 【敏感暴露面】${crtData.sensitive.join(", ") || "无"}
+${ragContext ? `\n【Cloudflare 官方智库匹配方案】\n${ragContext}\n` : ''}
 
 请严格按以下格式输出：
 
@@ -387,7 +401,7 @@ CF状态: ${httpData.cfProxy ? '已开启代理' : '未开启'} | Zero Trust: ${
 
 ### 💡 核心切入点 (Core Hooks)
 *   **[切入点1]**: (基于雷达证据，指出其安全或网络架构的一个具体优化点)
-*   **[切入点2]**: (结合暴露面或技术栈差异提出 Cloudflare 的替代价值)
+*   **[切入点2]**: (结合暴露面、技术栈差异或招聘信息提出 Cloudflare 的替代价值)
 
 ### 🎯 主推产品组合
 1.  **[产品名称]** - [一句话理由]
@@ -419,7 +433,7 @@ CF状态: ${httpData.cfProxy ? '已开启代理' : '未开启'} | Zero Trust: ${
 
   return {
     domain, company: displayName,
-    domainConfidence, domainSource, // 🔑 新增置信度字段
+    domainConfidence, domainSource,
     ips: dnsData.ips, emailProvider: dnsData.emailProvider,
     serverHeader: httpData.server, cfProxy: httpData.cfProxy, cfTeam: httpData.cfTeam,
     signatures: httpData.signatures, securityMaturity: httpData.securityMaturity,
@@ -428,6 +442,142 @@ CF状态: ${httpData.cfProxy ? '已开启代理' : '未开启'} | Zero Trust: ${
     orgIntel: apolloOrgData, techStack: bwData,
     maimaiCompanyUrl: `https://maimai.cn/web/search_center?type=contact&query=${encodeURIComponent(displayName + " CTO")}`
   };
+}
+
+async function scrapeWebsiteData(domain, env) {
+  if (!env.BROWSER) return null;
+  let browser = null;
+  try {
+    browser = await env.BROWSER.launch();
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+    
+    // 打开主页
+    const homepageUrl = `https://${domain}`;
+    await page.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    
+    // 提取首页的 title, meta description, meta keywords 和部分 body 文本
+    const pageData = await page.evaluate(() => {
+      const title = document.title || "";
+      const descEl = document.querySelector('meta[name="description"]') || document.querySelector('meta[property="og:description"]');
+      const desc = descEl ? descEl.getAttribute('content') : "";
+      const keywordsEl = document.querySelector('meta[name="keywords"]');
+      const keywords = keywordsEl ? keywordsEl.getAttribute('content') : "";
+      
+      // 提取前 1000 个字符的文本，用于分析基本内容
+      const bodyText = document.body ? document.body.innerText.substring(0, 1000) : "";
+      
+      // 寻找含有招聘、Careers, Jobs, About, 关于等字样的链接
+      const links = Array.from(document.querySelectorAll('a')).map(a => ({
+        href: a.href || "",
+        text: (a.innerText || "").trim().toLowerCase()
+      }));
+      
+      return { title, desc, keywords, bodyText, links };
+    });
+    
+    let careerText = "";
+    // 过滤出疑似招聘或关于我们的链接
+    const careerKeywords = ["careers", "jobs", "hiring", "join", "招聘", "加入我们", "人才招聘", "关于我们", "about"];
+    const targetLink = pageData.links.find(link => 
+      link.href && 
+      !link.href.startsWith("mailto:") &&
+      !link.href.startsWith("tel:") &&
+      careerKeywords.some(kw => link.text.includes(kw) || link.href.toLowerCase().includes(kw))
+    );
+    
+    if (targetLink && targetLink.href) {
+      try {
+        // 跳转到招聘/关于页面提取技术关键词
+        await page.goto(targetLink.href, { waitUntil: 'domcontentloaded', timeout: 8000 });
+        careerText = await page.evaluate(() => {
+          return document.body ? document.body.innerText.substring(0, 2000) : "";
+        });
+      } catch (err) {
+        console.warn("Failed to scrape career subpage:", err);
+      }
+    }
+    
+    await browser.close();
+    
+    // 从网页文本中提取常见的技术/安全关键词
+    const techWordsList = [
+      "cloudflare", "akamai", "f5", "imperva", "waf", "cdn", "zero trust", "sase",
+      "aws", "azure", "kubernetes", "k8s", "docker", "react", "vue", "node", "golang",
+      "python", "java", "devops", "security", "安全", "出海", "海外", "高防", "防护"
+    ];
+    
+    const combinedText = (pageData.bodyText + " " + careerText).toLowerCase();
+    const foundTechs = techWordsList.filter(word => combinedText.includes(word));
+    
+    return {
+      title: pageData.title,
+      desc: pageData.desc || pageData.bodyText.substring(0, 300).replace(/\s+/g, ' '),
+      keywords: pageData.keywords,
+      hiringKeywords: foundTechs
+    };
+  } catch (e) {
+    console.error("Scraper Error:", e);
+    if (browser) await browser.close();
+    return null;
+  }
+}
+
+async function queryVectorizeRAG(description, industry, env) {
+  if (!env.VECTORIZE || !env.AI) return "";
+  try {
+    const textToEmbed = `${industry || ""} ${description || ""}`.trim();
+    if (!textToEmbed) return "";
+    
+    // 生成 Embedding 向量
+    const embeddingRes = await env.AI.run("@cf/baai/bge-small-en-v1.5", {
+      text: [textToEmbed]
+    });
+    const embedding = embeddingRes.data?.[0];
+    if (!embedding) return "";
+    
+    // 查询云端向量库
+    const matches = await env.VECTORIZE.query(embedding, {
+      topK: 2,
+      returnMetadata: true
+    });
+    
+    if (matches && matches.matches && matches.matches.length > 0) {
+      return matches.matches
+        .map(m => `【参考知识文档: ${m.metadata?.filename || "未知"}】\n${m.metadata?.text || ""}`)
+        .join("\n\n");
+    }
+  } catch (err) {
+    console.error("Vectorize RAG Error:", err);
+  }
+  return "";
+}
+
+async function getGitHubOrgData(displayName, domain, env) {
+  let orgGuess = domain.split('.')[0];
+  if (orgGuess === "com" || orgGuess === "co" || orgGuess === "net") {
+    orgGuess = displayName.replace(/\s+/g, '').toLowerCase();
+  }
+  
+  try {
+    const url = `https://api.github.com/orgs/${orgGuess}/repos?sort=stars&per_page=3`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Cloudflare-Worker-BDR-Engine'
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (res.ok) {
+      const repos = await res.json();
+      if (Array.isArray(repos) && repos.length > 0) {
+        const repoInfos = repos.map(r => `*   **${r.name}** (${r.language || "Unknown"}) - ⭐ ${r.stargazers_count} | 🔄 Last commit: ${r.pushed_at ? r.pushed_at.substring(0, 10) : "N/A"}`).join("\n");
+        return `GitHub Org: ${orgGuess}\n${repoInfos}`;
+      }
+    }
+  } catch (err) {
+    console.warn(`GitHub Org API check failed for ${orgGuess}:`, err);
+  }
+  return "";
 }
 
 // ── 自动发现引擎 (定时任务驱动) ──
