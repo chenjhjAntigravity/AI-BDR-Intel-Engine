@@ -157,32 +157,21 @@ async function runOSINT(company, inDomain, env) {
     } catch(e) { console.error("Apollo Search Error:", e); }
   }
 
-  // ── 阶段 2: 如果 Apollo 没搜到，用 DeepSeek 推测 ──
-  if (!domain && company && env.DEEPSEEK_API_KEY) {
+  // ── 阶段 2: 如果 Apollo 没搜到，用 AI 推测（高可用 fallback） ──
+  if (!domain && company && (env.DEEPSEEK_API_KEY || env.AI)) {
     try {
-      const dsReq = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.DEEPSEEK_API_KEY}` },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [
-            // 🔑 修复: 明确限定只返回中国大陆企业，外国公司返回 unknown
-            { role: "system", content: "You are a precise intelligence assistant for a China-focused BDR team. Given a Chinese company name, return ONLY the official root domain of that CHINESE MAINLAND company (e.g. bonc.com.cn, xtalpi.com). If this is clearly a foreign company or you cannot determine a China-based domain with confidence, return exactly: unknown. NO explanations, NO extra text." },
-            { role: "user", content: company }
-          ]
-        })
-      });
-      if (dsReq.ok) {
-        const res = await dsReq.json();
-        let guess = res.choices[0].message.content.trim().toLowerCase();
-        guess = guess.replace(/[!"#$%&'()*+,:;<=>?@\[\]^`{|}~]/g, "").split("\n")[0].split(" ")[0];
-        if (guess !== 'unknown' && guess.includes('.')) {
-          domain = guess;
-          domainConfidence = 'low'; // AI 推测，置信度低
-          domainSource = 'DeepSeek推测';
-        }
+      const content = await callAI(env, [
+        { role: "system", content: "You are a precise intelligence assistant for a China-focused BDR team. Given a Chinese company name, return ONLY the official root domain of that CHINESE MAINLAND company (e.g. bonc.com.cn, xtalpi.com). If this is clearly a foreign company or you cannot determine a China-based domain with confidence, return exactly: unknown. NO explanations, NO extra text." },
+        { role: "user", content: company }
+      ]);
+      let guess = content.trim().toLowerCase();
+      guess = guess.replace(/[!"#$%&'()*+,:;<=>?@\[\]^`{|}~]/g, "").split("\n")[0].split(" ")[0];
+      if (guess !== 'unknown' && guess.includes('.')) {
+        domain = guess;
+        domainConfidence = 'low';
+        domainSource = 'AI推测';
       }
-    } catch(e) {}
+    } catch(e) { console.error("AI Domain Guess Error:", e); }
   }
 
   if (!domain) throw new Error(`未能在数据库中找到 "${company}" 的官方域名。建议手动输入域名（如: xtalpi.com）进行探测。`);
@@ -368,9 +357,9 @@ async function runOSINT(company, inDomain, env) {
     takeScreenshot(`https://${domain}`, env).catch(() => null)
   ]);
 
-  // AI 攻坚策略 (DeepSeek - 三段式专家级输出)
+  // AI 攻坚策略 (AI - 三段式专家级输出，高可用 fallback)
   let aiStrategy = "AI 策略生成失败。";
-  if (env.DEEPSEEK_API_KEY) {
+  if (env.DEEPSEEK_API_KEY || env.AI) {
     try {
       const contactNames = contactData.map(c => c.name).join(', ');
       const englishDesc = apolloOrgData.desc && !['N/A','暂无画像',''].includes(apolloOrgData.desc) ? apolloOrgData.desc : '';
@@ -410,13 +399,7 @@ CF状态: ${httpData.cfProxy ? '已开启代理' : '未开启'} | Zero Trust: ${
 主题：关于贵司海外网络架构优化的探讨
 
 [直接写邮件正文]`;
-      const res = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.DEEPSEEK_API_KEY}` },
-        body: JSON.stringify({ model: "deepseek-chat", messages: [{ role: "user", content: prompt }] }),
-        signal: AbortSignal.timeout(12000) // 限制 12 秒，防止 Worker 超过 30s 极限被杀
-      });
-      const data = await res.json();
-      const rawContent = data.choices?.[0]?.message?.content || '';
+      const rawContent = await callAI(env, [{ role: "user", content: prompt }]);
       // 提取翻译好的中文简介，并从 AI 策略正文中剔除（避免重复显示）
       const descMatch = rawContent.match(/###\s*📝[^\n]*\n([\s\S]*?)(?=###)/);
       if (descMatch) {
@@ -425,7 +408,7 @@ CF状态: ${httpData.cfProxy ? '已开启代理' : '未开启'} | Zero Trust: ${
       } else {
         aiStrategy = rawContent;
       }
-    } catch(e) {}
+    } catch(e) { console.error("AI Strategy generation failed:", e); }
   }
     const screenshotData = await takeScreenshot(`https://${domain}`, env).catch(() => null);
     if (screenshotData && env.REPORTS_BUCKET) {
@@ -456,6 +439,58 @@ function extractJSON(text) {
     if (s !== -1 && e2 !== -1) { try { return JSON.parse(text.substring(s, e2+1)); } catch(e3) {} }
     return { company: null, score: 0, reason: '' };
   }
+}
+
+async function callAI(env, messages, options = {}) {
+  if (env.DEEPSEEK_API_KEY) {
+    try {
+      const response = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.DEEPSEEK_API_KEY}` },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: messages,
+          ...options
+        }),
+        signal: AbortSignal.timeout(12000)
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
+        if (content) return content;
+      } else {
+        console.warn(`DeepSeek API failed with status ${response.status}`);
+      }
+    } catch (err) {
+      console.warn("DeepSeek API call failed or timed out, falling back to Workers AI:", err);
+    }
+  }
+
+  if (env.AI) {
+    try {
+      console.log("Using Cloudflare Workers AI Fallback (Qwen)...");
+      const result = await env.AI.run("@cf/qwen/qwen1.5-14b-chat-awq", {
+        messages: messages
+      });
+      if (result && result.response) {
+        return result.response;
+      }
+    } catch (err) {
+      console.error("Workers AI Qwen fallback failed, trying Llama 3:", err);
+      try {
+        const result = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+          messages: messages
+        });
+        if (result && result.response) {
+          return result.response;
+        }
+      } catch (err2) {
+        console.error("Workers AI Llama 3 fallback failed:", err2);
+      }
+    }
+  }
+
+  throw new Error("All AI endpoints failed");
 }
 
 async function sendTelegram(env, text) {
@@ -523,17 +558,12 @@ async function runDiscovery(env, ctx) {
     for (const item of items.slice(0, 15)) {
       let data = { company: null, score: 0, reason: '' };
       
-      if (env.DEEPSEEK_API_KEY) {
+      if (env.DEEPSEEK_API_KEY || env.AI) {
         try {
-          const aiRes = await fetch('https://api.deepseek.com/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}` },
-            body: JSON.stringify({
-              model: 'deepseek-chat',
-              messages: [
-                { 
-                  role: 'system', 
-                  content: `你是一个专业的 Cloudflare BDR 助手，专注于华南大区（广东/深圳/广州）的客户开发。
+          const content = await callAI(env, [
+            { 
+              role: 'system', 
+              content: `你是一个专业的 Cloudflare BDR 助手，专注于华南大区（广东/深圳/广州）的客户开发。
 任务：分析新闻标题，识别是否有中国大陆公司（特别是华南地区公司）正在融资或准备出海。
 规则：
 1. 必须是中国大陆公司。忽略 Google, OpenAI, Anthropic 等纯外国公司。
@@ -541,31 +571,11 @@ async function runDiscovery(env, ctx) {
 3. 业务相关性：优先考虑游戏出海、跨境电商、SaaS、短剧/内容、金融科技等高度依赖 Cloudflare 的行业。
 4. 返回 JSON: {"company":"全名", "location":"省份/城市", "isGuangdong":true/false, "isSouthChina":true/false, "score":1-10, "reason":"理由"}
 5. 广东公司且有出海倾向的，score 必须 >= 9。广东公司无论是否出海，score 基础分 +2。` 
-                }, 
-                { role: 'user', content: item.title }
-              ]
-            })
-          });
-          if (aiRes.ok) {
-            data = extractJSON((await aiRes.json()).choices[0].message.content);
-          }
-        } catch(e) { console.error('DeepSeek discovery error:', e); }
-      }
-
-      // [FALLBACK] Cloudflare Workers AI (Llama-3)
-      if ((!data.company || data.score === 0) && env.AI) {
-        try {
-          const aiRes = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
-            messages: [
-              {
-                role: "system",
-                content: `You are a BDR Assistant. Analyze the news title. Is it about a Chinese company (especially Guangdong/Shenzhen) raising funds or expanding overseas? Return ONLY JSON: {"company":"name", "location":"city", "isGuangdong":true/false, "score":1-10, "reason":"short reason"}. If not relevant or not a Chinese company, return {"company":null, "score":0}.`
-              },
-              { role: "user", content: item.title }
-            ]
-          });
-          data = extractJSON(aiRes.response);
-        } catch(e) { console.error('Workers AI discovery error:', e); }
+            }, 
+            { role: 'user', content: item.title }
+          ]);
+          data = extractJSON(content);
+        } catch(e) { console.error('AI discovery error in runDiscovery:', e); }
       }
 
         if (data.company && data.score >= 7 && env.DB) {
@@ -612,25 +622,18 @@ async function runDiscovery(env, ctx) {
 
 export default {
   async email(message, env, ctx) {
-    if (!env.DEEPSEEK_API_KEY) return;
+    if (!env.DEEPSEEK_API_KEY && !env.AI) return;
     try {
       const parser = new PostalMime();
       const parsed = await parser.parse(message.raw);
       const content = parsed.text || parsed.html || "";
       
-      const analyze = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.DEEPSEEK_API_KEY}` },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [
-            { role: "system", content: "你是一个专业的 BDR 助手。请分析邮件内容，提取是否有公司正在融资、产品发布、或者是潜客相关的商机。请提取公司全称。返回 JSON 格式: {\"company\": \"...\", \"score\": 1-10, \"reason\": \"...\"}。若不相关，company 返回 null。" },
-            { role: "user", content: `From: ${message.from}\nTo: ${message.to}\nSubject: ${message.headers.get("subject") || "No Subject"}\n\n${content.substring(0, 5000)}` }
-          ]
-        })
-      });
+      const emailContent = await callAI(env, [
+        { role: "system", content: "你是一个专业的 BDR 助手。请分析邮件内容，提取是否有公司正在融资、产品发布、或者是潜客相关的商机。请提取公司全称。返回 JSON 格式: {\"company\": \"...\", \"score\": 1-10, \"reason\": \"...\"}。若不相关，company 返回 null。" },
+        { role: "user", content: `From: ${message.from}\nTo: ${message.to}\nSubject: ${message.headers.get("subject") || "No Subject"}\n\n${content.substring(0, 5000)}` }
+      ]);
       
-      const aiRes = await analyze.json();
-      const data = extractJSON(aiRes.choices[0].message.content);
+      const data = extractJSON(emailContent);
       
       if (data.company && data.score >= 7) {
         if (env.DB) {
