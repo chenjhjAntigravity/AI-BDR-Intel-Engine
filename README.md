@@ -1,8 +1,8 @@
 # 🚀 AI BDR Intel Engine
 
-An open-source, fully automated Business Development Representative (BDR) intelligence engine built entirely on **Cloudflare Workers** and powered by **DeepSeek AI**. 
+An open-source, fully automated Business Development Representative (BDR) intelligence engine built entirely on **Cloudflare Workers** and powered by **DeepSeek AI** + **Cloudflare Workers AI** (for High Availability).
 
-It automatically discovers high-value leads from various RSS feeds (Google News, ITJuzi, Google Alerts), intercepts industry newsletters via Cloudflare Email Routing, and utilizes AI to analyze, score, and summarize the business opportunities. High-priority leads are pushed instantly via Telegram and Email.
+It automatically discovers high-value leads from various RSS feeds (Google News, ITJuzi, Google Alerts), intercepts industry newsletters via Cloudflare Email Routing, and utilizes a robust AI pipeline to analyze, score, and summarize business opportunities. High-priority leads are pushed instantly via Telegram and Email.
 
 ---
 
@@ -11,7 +11,7 @@ It automatically discovers high-value leads from various RSS feeds (Google News,
 - **🌐 Zero-Maintenance Serverless**: Runs entirely on Cloudflare Workers edge network. No servers to manage, nearly $0 to run.
 - **📡 Multi-Source Discovery**: Periodically scans custom Google News queries, generic RSS feeds (ITJuzi, 36Kr), and Google Alerts.
 - **✉️ Inbound Email Interception**: Integrates with Cloudflare Email Routing to ingest and analyze third-party industry newsletters (Crunchbase, etc.).
-- **🧠 DeepSeek AI Analysis**: Automatically filters out noise, reads long articles, and summarizes *why* a company is a high-value target with a 1-10 score.
+- **🧠 Hybrid AI Pipeline (DeepSeek + Workers AI)**: Automatically runs DeepSeek (`deepseek-chat`) as the primary brain. If the DeepSeek API fails or times out (12s limit), it seamlessly falls back to Cloudflare Workers AI (`Qwen-14B` and `Llama-3-8B`) at zero additional cost.
 - **📬 Multi-Channel Alerts**: Pushes beautiful HTML intelligence reports to your personal email (powered by Resend API) and instant alerts to Telegram.
 - **🗃️ Lead Deduplication**: Uses Cloudflare D1 (SQL database) to ensure you never get spammed with the same lead twice.
 
@@ -21,7 +21,7 @@ It automatically discovers high-value leads from various RSS feeds (Google News,
 
 1. **Cron Trigger**: Wakes up at 9:00 AM (Mon-Fri) to fetch RSS feeds.
 2. **Email Trigger**: Listens for any incoming emails to your subscribed aliases.
-3. **DeepSeek Pipeline**: Reads the text/HTML, identifies the target company, scores the lead, and extracts the core rationale.
+3. **AI Pipeline**: Translates and analyzes the company profile, tech stack, and network routing, scoring it from 1-10.
 4. **D1 Database**: Checks for existing entries. If new, inserts the lead.
 5. **Notification Engine**: Dispatches HTML emails via `Resend API` and messages to Telegram Bot API.
 
