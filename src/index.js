@@ -467,25 +467,24 @@ async function sendTelegram(env, text) {
 }
 
 async function sendEmail(env, subject, htmlContent) {
-  if (!env.SUBSCRIBER_EMAIL) return;
+  if (!env.SUBSCRIBER_EMAIL || !env.RESEND_API_KEY) return;
   try {
-    const req = new Request('https://api.mailchannels.net/tx/v1/send', {
+    const req = new Request('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
-        personalizations: [
-          {
-            to: [{ email: env.SUBSCRIBER_EMAIL, name: 'BDR Subscriber' }],
-          },
-        ],
-        from: { email: 'bdr-bot@cfai.uk', name: 'BDR Intelligence Bot' },
+        from: 'BDR Intel Bot <onboarding@resend.dev>',
+        to: [env.SUBSCRIBER_EMAIL],
         subject: subject,
-        content: [{ type: 'text/html', value: htmlContent }],
-      }),
+        html: htmlContent
+      })
     });
     const res = await fetch(req);
     if (!res.ok) {
-      console.error('MailChannels Error:', await res.text());
+      console.error('Resend Error:', await res.text());
     }
   } catch (err) {
     console.error('Failed to send email:', err);
@@ -684,6 +683,29 @@ export default {
     const url = new URL(request.url);
     const token = url.searchParams.get("token") || "";
     const isAuthorized = !env.ACCESS_TOKEN || (token === env.ACCESS_TOKEN);
+
+    if (url.pathname === "/test-email") {
+      try {
+        const req = new Request('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            from: 'BDR Intel Bot <onboarding@resend.dev>',
+            to: [env.SUBSCRIBER_EMAIL || 'chenjhj@gmail.com'],
+            subject: 'Test from Cloudflare Worker (Resend)',
+            html: '<p>This is a test email from the Cloudflare worker using Resend API.</p>'
+          })
+        });
+        const res = await fetch(req);
+        const text = await res.text();
+        return new Response(`Status: ${res.status}\nBody: ${text}`, { status: 200 });
+      } catch (err) {
+        return new Response(`Error: ${err.message}`, { status: 500 });
+      }
+    }
 
     // ── 本地同步接口 ──
     if (url.pathname === "/record" && request.method === "POST") {

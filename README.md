@@ -12,7 +12,7 @@ It automatically discovers high-value leads from various RSS feeds (Google News,
 - **📡 Multi-Source Discovery**: Periodically scans custom Google News queries, generic RSS feeds (ITJuzi, 36Kr), and Google Alerts.
 - **✉️ Inbound Email Interception**: Integrates with Cloudflare Email Routing to ingest and analyze third-party industry newsletters (Crunchbase, etc.).
 - **🧠 DeepSeek AI Analysis**: Automatically filters out noise, reads long articles, and summarizes *why* a company is a high-value target with a 1-10 score.
-- **📬 Multi-Channel Alerts**: Pushes beautiful HTML intelligence reports to your personal email (via free MailChannels) and instant alerts to Telegram.
+- **📬 Multi-Channel Alerts**: Pushes beautiful HTML intelligence reports to your personal email (powered by Resend API) and instant alerts to Telegram.
 - **🗃️ Lead Deduplication**: Uses Cloudflare D1 (SQL database) to ensure you never get spammed with the same lead twice.
 
 ---
@@ -23,7 +23,7 @@ It automatically discovers high-value leads from various RSS feeds (Google News,
 2. **Email Trigger**: Listens for any incoming emails to your subscribed aliases.
 3. **DeepSeek Pipeline**: Reads the text/HTML, identifies the target company, scores the lead, and extracts the core rationale.
 4. **D1 Database**: Checks for existing entries. If new, inserts the lead.
-5. **Notification Engine**: Dispatches HTML emails via `MailChannels` and messages to Telegram Bot API.
+5. **Notification Engine**: Dispatches HTML emails via `Resend API` and messages to Telegram Bot API.
 
 ---
 
@@ -33,7 +33,8 @@ It automatically discovers high-value leads from various RSS feeds (Google News,
 1. A Cloudflare Account (Free tier is perfectly fine).
 2. [Node.js](https://nodejs.org/) installed.
 3. A DeepSeek API Key.
-4. A Telegram Bot Token & Chat ID.
+4. A Resend API Key (Free tier at resend.com).
+5. A Telegram Bot Token & Chat ID.
 
 ### Step 1: Install Wrangler
 ```bash
@@ -77,6 +78,7 @@ SUBSCRIBER_EMAIL = "your_personal_email@gmail.com" # <--- Where to send leads
 ### Step 4: Setup Secrets
 Run the following commands to securely add your API keys to the Cloudflare Worker:
 ```bash
+npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put DEEPSEEK_API_KEY
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_CHAT_ID

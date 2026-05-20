@@ -17,7 +17,7 @@ BRIDGE_URL = "https://your-bridge-url.example.com"
 SUBSCRIBER_EMAIL = "your_email@gmail.com"
 
 # API Keys should be set securely via wrangler secret:
-# wrangler secret put APOLLO_API_KEY
+# wrangler secret put RESEND_API_KEY
 # wrangler secret put DEEPSEEK_API_KEY
 # wrangler secret put TELEGRAM_BOT_TOKEN
 # wrangler secret put TELEGRAM_CHAT_ID
