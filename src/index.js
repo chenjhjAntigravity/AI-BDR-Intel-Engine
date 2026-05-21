@@ -66,33 +66,43 @@ async function saveScreenshotToR2(domain, screenshot, env) {
 
 // 🔒 高权重知名公司域名黑名单：永不自动分配给无关的搜索结果
 const DOMAIN_BLACKLIST = new Set([
-  "huawei.com", "xiaomi.com", "alibaba.com", "tencent.com", "jd.com",
+  "huawei.com", "xiaomi.com", "mi.com", "miui.com", "alibaba.com", "tencent.com", "jd.com",
   "baidu.com", "bytedance.com", "meituan.com", "pinduoduo.com", "netease.com",
   "weibo.com", "didi.com", "lenovo.com", "haier.com", "hisense.com",
   "oppo.com", "vivo.com", "oneplus.com", "meizu.com", "zte.com.cn",
-  "hikvision.com", "dahuasecurity.com", "byd.com", "geely.com", "chery.com"
+  "hikvision.com", "dahuasecurity.com", "byd.com", "geely.com", "chery.com",
+  "samsung.com", "lg.com", "sony.com", "panasonic.com", "siemens.com",
+  "honeywell.com", "qualcomm.com", "intel.com", "microsoft.com", "google.com",
+  "apple.com", "amazon.com", "meta.com", "openai.com", "anthropic.com",
+  "nio.com", "xpeng.com", "li-auto.com", "baic.com.cn", "saic.com.cn",
+  "ctrip.com", "trip.com", "qunar.com", "iqiyi.com", "bilibili.com",
+  "kuaishou.com", "tiktok.com", "douyin.com", "zhihu.com"
 ]);
 
 function nameSimilarityCheck(inputName, apolloOrgName) {
   if (!inputName || !apolloOrgName) return false;
   const input = inputName.toLowerCase();
   const apollo = apolloOrgName.toLowerCase();
+  
   // 提取输入名中所有英文词（>= 3 字母）
   const inputWords = input.match(/[a-z]{3,}/g) || [];
-  // 如果输入有英文词，看 Apollo 名是否包含其中之一
-  if (inputWords.length > 0) {
-    return inputWords.some(w => apollo.includes(w));
+  
+  // 🔒 过滤通用英文词，避免 "Technology", "Group", "Digital" 导致假阳性匹配
+  const genericEN = /^(technology|tech|group|holding|holdings|corporation|corp|limited|ltd|network|networks|digital|software|systems|system|electronics|electronic|communication|communications|media|culture|education|medical|finance|capital|investment|investments|international|global|china|shenzhen|guangzhou|beijing|shanghai|chengdu|hangzhou|wuhan|xian|co|inc|solutions|solution|services|service|industries|industry|management|partner|partners)$/i;
+  const filteredWords = inputWords.filter(w => !genericEN.test(w));
+  
+  // 如果有过滤后的非通用英文词，看 Apollo 名是否包含其中之一
+  if (filteredWords.length > 0) {
+    return filteredWords.some(w => apollo.includes(w));
   }
-  // 🔑 修复: 纯中文输入时，不再盲目 return true
-  // 策略：去除通用词后，检查中文关键词是否出现在 Apollo 公司名（全小写）中
-  // （部分公司 Apollo 名含中文，如 "Huawei Technologies 华为技术"）
+  
+  // 如果仅有通用词（filteredWords为空，但原词有），或原词无英文，则走中文校验
   const genericCN = /(科技|技术|集团|有限公司|股份|责任|公司|控股|网络|信息|数字|智能|软件|系统|电子|通信|实业|商业|传媒|文化|教育|医疗|金融|资本|投资|国际|全球|中国|深圳|广州|北京|上海|成都|杭州|武汉|西安)/g;
   const coreKeyword = input.replace(genericCN, "").trim();
   if (coreKeyword.length >= 2) {
-    // Apollo 名含有该中文关键字则认为匹配
     return apollo.includes(coreKeyword);
   }
-  // 关键词太短或全部被过滤掉（如「XX科技」→""），降级为 false，交由 DeepSeek 兜底
+  
   return false;
 }
 
@@ -100,58 +110,87 @@ async function runOSINT(company, inDomain, env) {
   let domain = (inDomain || "").trim().toLowerCase();
   let domainConfidence = 'high'; // 'high' | 'medium' | 'low'
   let domainSource = '手动输入';
+
+  // Extract Chinese and English parts if present in combined name formats (e.g. "未岚大陆 (Navimow)")
+  let chinesePart = "";
+  let englishPart = "";
+  
+  if (company) {
+    // Match patterns like "未岚大陆 (Navimow)" or "未岚大陆(Navimow)" or "未岚大陆 / Navimow"
+    const parenMatch = company.match(/^([^\(（\/\s]+)[\s\/\(（]+([^\)）]+)[\)）]?/);
+    if (parenMatch) {
+      chinesePart = parenMatch[1].trim();
+      englishPart = parenMatch[2].replace(/[\)）]/g, '').trim();
+    } else {
+      // Fallback: extract Chinese characters and English words
+      const cnMatch = company.match(/[\u4e00-\u9fa5]+/g);
+      const enMatch = company.match(/[a-zA-Z0-9\s\-]{3,}/g);
+      if (cnMatch) chinesePart = cnMatch.join("").trim();
+      if (enMatch) englishPart = enMatch.join("").trim();
+    }
+  }
+
   const cLower = (company || "").toLowerCase();
   if (cLower.includes("cogolinks") || cLower.includes("行云数字")) {
     domain = "cogolinks.com";
   }
 
+  const searchQueries = [];
+  if (company) searchQueries.push(company);
+  if (englishPart && englishPart !== company) searchQueries.push(englishPart);
+  if (chinesePart && chinesePart !== company && chinesePart !== englishPart) searchQueries.push(chinesePart);
+
   // ── 阶段 1: Apollo 官方组织库搜索 ──
-  // 🔑 修复: 新增 organization_locations 中国过滤 + 名称相似度校验
-  if (!domain && company && env.APOLLO_API_KEY) {
+  if (!domain && searchQueries.length > 0 && env.APOLLO_API_KEY) {
     try {
-      const apolloSearch = await fetch("https://api.apollo.io/api/v1/organizations/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Api-Key": env.APOLLO_API_KEY },
-        body: JSON.stringify({
-          q_organization_name: company,
-          // 🔑 只搜索中国公司，直接排除印度/外国同名企业
-          organization_locations: ["China"],
-          per_page: 3
-        })
-      });
-      if (apolloSearch.ok) {
-        const res = await apolloSearch.json();
-        const orgs = res.organizations || [];
-        
-        for (const org of orgs.slice(0, 3)) {
-          const matchedDomain = org.primary_domain?.toLowerCase();
-          // 🔑 修复: 扩展黑名单过滤，防止华为等头部企业域名被误分配
-          if (!matchedDomain || DOMAIN_BLACKLIST.has(matchedDomain)) {
-            console.warn(`⛔ 域名黑名单过滤: ${matchedDomain} — 跳过`);
-            continue;
-          }
+      for (const query of searchQueries) {
+        if (domain) break;
+        console.log(`🔍 Querying Apollo organization search for: ${query}`);
+        const apolloSearch = await fetch("https://api.apollo.io/api/v1/organizations/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Api-Key": env.APOLLO_API_KEY },
+          body: JSON.stringify({
+            q_organization_name: query,
+            organization_locations: /[\u4e00-\u9fa5]/.test(query) ? ["China"] : undefined,
+            per_page: 3
+          })
+        });
+        if (apolloSearch.ok) {
+          const res = await apolloSearch.json();
+          const orgs = res.organizations || [];
           
-          // 🔑 名称相似度检测：确保 Apollo 返回的公司名与输入相关
-          const nameOk = nameSimilarityCheck(company, org.name || '');
-          if (!nameOk) {
-            console.warn(`⚠️ 名称不匹配: 输入"${company}" vs Apollo"${org.name}"(${matchedDomain}) — 跳过`);
-            continue;
-          }
-          
-          // DNS 存活校验
-          try {
-            const dns = await fetch(`https://cloudflare-dns.com/dns-query?name=${matchedDomain}&type=A`, { 
-              headers: { "Accept": "application/dns-json" } 
-            }).then(r => r.json());
-            
-            if (dns.Answer && dns.Answer.length > 0) {
-              domain = matchedDomain;
-              domainConfidence = nameOk ? 'high' : 'medium';
-              domainSource = `Apollo [${org.name}]`;
-              console.log(`✅ Live Domain Found via Apollo (CN filtered): ${domain}`);
-              break; 
+          for (const org of orgs.slice(0, 3)) {
+            const matchedDomain = org.primary_domain?.toLowerCase();
+            if (!matchedDomain || DOMAIN_BLACKLIST.has(matchedDomain)) {
+              console.warn(`⛔ 域名黑名单过滤: ${matchedDomain} — 跳过`);
+              continue;
             }
-          } catch(e) {}
+            
+            // Name similarity check
+            const nameOk = nameSimilarityCheck(query, org.name || '') || 
+                           (chinesePart && nameSimilarityCheck(chinesePart, org.name || '')) || 
+                           (englishPart && nameSimilarityCheck(englishPart, org.name || '')) || 
+                           nameSimilarityCheck(company, org.name || '');
+            if (!nameOk) {
+              console.warn(`⚠️ 名称不匹配: 查询"${query}" vs Apollo"${org.name}"(${matchedDomain}) — 跳过`);
+              continue;
+            }
+            
+            // DNS check
+            try {
+              const dns = await fetch(`https://cloudflare-dns.com/dns-query?name=${matchedDomain}&type=A`, { 
+                headers: { "Accept": "application/dns-json" } 
+              }).then(r => r.json());
+              
+              if (dns.Answer && dns.Answer.length > 0) {
+                domain = matchedDomain;
+                domainConfidence = nameOk ? 'high' : 'medium';
+                domainSource = `Apollo [${org.name}]`;
+                console.log(`✅ Live Domain Found via Apollo for query [${query}]: ${domain}`);
+                break; 
+              }
+            } catch(e) {}
+          }
         }
       }
     } catch(e) { console.error("Apollo Search Error:", e); }
@@ -160,16 +199,23 @@ async function runOSINT(company, inDomain, env) {
   // ── 阶段 2: 如果 Apollo 没搜到，用 AI 推测（高可用 fallback） ──
   if (!domain && company && (env.DEEPSEEK_API_KEY || env.AI)) {
     try {
+      const userPrompt = `Chinese Name: ${chinesePart || company}\nEnglish Brand/Name: ${englishPart || 'None'}\nFull Input: ${company}`;
       const content = await callAI(env, [
-        { role: "system", content: "You are a precise intelligence assistant for a China-focused BDR team. Given a Chinese company name, return ONLY the official root domain of that CHINESE MAINLAND company (e.g. bonc.com.cn, xtalpi.com). If this is clearly a foreign company or you cannot determine a China-based domain with confidence, return exactly: unknown. NO explanations, NO extra text." },
-        { role: "user", content: company }
+        { 
+          role: "system", 
+          content: "You are a precise intelligence assistant for a China-focused BDR team. Given a Chinese company name and its English brand name, return ONLY the official root domain of that company (e.g. bonc.com.cn, xtalpi.com, navimow.com, pismart.com). \n\nCRITICAL RULE: Never return the domain of a parent brand, large investor, or famous platform (e.g. never return mi.com, xiaomi.com, tencent.com, alibaba.com, huawei.com) unless the company is literally Xiaomi/Tencent/etc. itself. If you only know a company is backed by a giant but don't know the company's own domain, return exactly: unknown.\n\nIf you cannot determine the domain with high confidence, return exactly: unknown. NO explanations, NO extra text." 
+        },
+        { role: "user", content: userPrompt }
       ]);
       let guess = content.trim().toLowerCase();
       guess = guess.replace(/[!"#$%&'()*+,:;<=>?@\[\]^`{|}~]/g, "").split("\n")[0].split(" ")[0];
-      if (guess !== 'unknown' && guess.includes('.')) {
+      if (guess !== 'unknown' && guess.includes('.') && !DOMAIN_BLACKLIST.has(guess)) {
         domain = guess;
         domainConfidence = 'low';
         domainSource = 'AI推测';
+        console.log(`💡 Live Domain Guessed via AI: ${domain}`);
+      } else if (DOMAIN_BLACKLIST.has(guess)) {
+        console.warn(`⛔ AI guessed a blacklisted domain: ${guess} — Blocked!`);
       }
     } catch(e) { console.error("AI Domain Guess Error:", e); }
   }
@@ -195,7 +241,7 @@ async function runOSINT(company, inDomain, env) {
   const displayName = company || domain;
 
   // 并行全量数据采集
-  let [dnsData, httpData, crtData, bwData, apolloOrgData, contactData, maimaiData, screenshot] = await Promise.all([
+  let [dnsData, httpData, crtData, bwData, apolloOrgData, contactData, maimaiData, screenshot, scrapedWebData, githubData] = await Promise.all([
     // 1. DNS 解析 (A记录 + MX记录 + CNAME 多维探测)
     (async () => {
       const [aRec, mxRec, cnameRec] = await Promise.all([
@@ -362,8 +408,6 @@ async function runOSINT(company, inDomain, env) {
   ]);
 
   // ── 进行 Vectorize RAG 销售智库查询 ──
-  const scrapedWebData = results[8];
-  const githubData = results[9];
   const finalDesc = apolloOrgData.desc && !['N/A','暂无画像',''].includes(apolloOrgData.desc) ? apolloOrgData.desc : (scrapedWebData?.desc || "");
   const ragContext = await queryVectorizeRAG(finalDesc, apolloOrgData.industry, env);
 
